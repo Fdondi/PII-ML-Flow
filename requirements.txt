@@ -9,3 +9,4 @@ python-dotenv>=1.0.0
 llama-cpp-python>=0.1.60
 streamlit
 pypdf
+mlflow>=2.0.0

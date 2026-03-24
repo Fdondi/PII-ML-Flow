@@ -18,6 +18,12 @@ from .labels import (
 )
 from .model import MultiHeadPiiModel
 
+try:
+    import mlflow
+    _MLFLOW_AVAILABLE = True
+except ImportError:
+    _MLFLOW_AVAILABLE = False
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -112,6 +118,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSONL sensitivity companion for validation rows.",
     )
+    parser.add_argument(
+        "--mlflow-experiment",
+        default="pii-multihead",
+        help="MLflow experiment name (default: pii-multihead).",
+    )
+    parser.add_argument(
+        "--mlflow-run-name",
+        default=None,
+        help="MLflow run name. Auto-generated if not provided.",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="Disable MLflow tracking even if mlflow is installed.",
+    )
     return parser.parse_args()
 
 
@@ -123,6 +144,34 @@ def main() -> None:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    use_mlflow = _MLFLOW_AVAILABLE and not args.no_mlflow
+    if use_mlflow:
+        mlflow.set_experiment(args.mlflow_experiment)
+        active_run = mlflow.start_run(run_name=args.mlflow_run_name)
+        # Log all hyperparameters
+        mlflow.log_params({
+            "model_name": config.model_name,
+            "learning_rate": config.learning_rate,
+            "weight_decay": config.weight_decay,
+            "warmup_ratio": config.warmup_ratio,
+            "dropout": config.dropout,
+            "epochs": config.epochs,
+            "train_batch_size": config.train_batch_size,
+            "max_span_len": config.max_span_len,
+            "negative_sample_rate": config.negative_sample_rate,
+            "proposal_loss_weight": config.proposal_loss_weight,
+            "type_loss_weight": config.type_loss_weight,
+            "sensitivity_loss_weight": config.sensitivity_loss_weight,
+            "lookalike_redact_target": config.lookalike_redact_target,
+            "no_info_keep_target": config.no_info_keep_target,
+            "early_stopping_patience": config.early_stopping_patience,
+            "early_stopping_min_delta": config.early_stopping_min_delta,
+            "seed": config.seed,
+            "max_length": config.max_length,
+            "nms_iou_threshold": config.nms_iou_threshold,
+            "redact_score_threshold": config.redact_score_threshold,
+        })
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_name, use_fast=True)
     train_ds = JsonlMultiHeadDataset(
@@ -200,6 +249,21 @@ def main() -> None:
             f"valid_loss={valid_metrics['loss']:.4f}"
         )
 
+        if use_mlflow:
+            mlflow.log_metrics(
+                {
+                    "train_loss": train_metrics["loss"],
+                    "train_proposal_loss": train_metrics["proposal_loss"],
+                    "train_type_loss": train_metrics["type_loss"],
+                    "train_sensitivity_loss": train_metrics["sensitivity_loss"],
+                    "valid_loss": valid_metrics["loss"],
+                    "valid_proposal_loss": valid_metrics["proposal_loss"],
+                    "valid_type_loss": valid_metrics["type_loss"],
+                    "valid_sensitivity_loss": valid_metrics["sensitivity_loss"],
+                },
+                step=epoch + 1,
+            )
+
         progressed_losses = []
         min_delta = max(0.0, float(config.early_stopping_min_delta))
         for loss_name in monitored_losses:
@@ -252,6 +316,17 @@ def main() -> None:
 
     history_path = output_dir / "train_history.json"
     history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+    if use_mlflow:
+        mlflow.log_metric("best_valid_loss", best_valid)
+        mlflow.log_metric("best_valid_proposal_loss", best_monitored["proposal_loss"])
+        mlflow.log_metric("best_valid_type_loss", best_monitored["type_loss"])
+        mlflow.log_metric("best_valid_sensitivity_loss", best_monitored["sensitivity_loss"])
+        mlflow.log_metric("epochs_trained", len(history))
+        mlflow.log_artifact(str(history_path), artifact_path="training")
+        mlflow.log_artifact(str(output_dir / "multihead_model.pt"), artifact_path="model")
+        mlflow.end_run()
+
     print(f"saved best checkpoint to {(output_dir / 'multihead_model.pt').resolve()}")
     print(f"saved train history to {history_path.resolve()}")
 
