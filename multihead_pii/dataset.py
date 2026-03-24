@@ -1,6 +1,5 @@
 import json
 import random
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -8,6 +7,13 @@ from typing import Dict, List, Optional, Set, Tuple
 import torch
 from torch.utils.data import Dataset
 
+from .decoder import (
+    CREDIT_CARD_PATTERN,
+    EMAIL_PATTERN,
+    IBAN_PATTERN,
+    IPV4_PATTERN,
+    PHONE_PATTERN,
+)
 from .labels import (
     BIO_LABEL_TO_ID,
     SENSITIVITY_LABEL_TO_ID,
@@ -15,13 +21,6 @@ from .labels import (
     sensitivity_from_item_category,
 )
 from .span_credit import overlap_credit
-
-
-EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-PHONE_PATTERN = re.compile(r"\+?\d[\d\-\s().]{6,}\d")
-IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,34}\b")
-CREDIT_CARD_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 
 REGEX_TYPE_MAP = {
     "EMAIL": EMAIL_PATTERN,

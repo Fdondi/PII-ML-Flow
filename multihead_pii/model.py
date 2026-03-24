@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -195,3 +195,26 @@ class MultiHeadPiiModel(nn.Module):
             "sensitivity_logits": sensitivity_logits,
             "meta": meta,
         }
+
+
+def load_checkpoint(checkpoint_path: str, device: str) -> Dict:
+    """Load a raw checkpoint dict from disk."""
+    return torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+
+def build_model_from_checkpoint(checkpoint: Dict, device: str) -> "MultiHeadPiiModel":
+    """Instantiate and return an eval-mode MultiHeadPiiModel from a checkpoint dict."""
+    from .config import MultiHeadConfig
+    cfg = MultiHeadConfig(**checkpoint["config"])
+    model = MultiHeadPiiModel(
+        model_name=cfg.model_name,
+        max_span_len=cfg.max_span_len,
+        span_width_vocab_size=cfg.span_width_vocab_size,
+        dropout=cfg.dropout,
+        proposal_loss_weight=cfg.proposal_loss_weight,
+        type_loss_weight=cfg.type_loss_weight,
+        sensitivity_loss_weight=cfg.sensitivity_loss_weight,
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.eval()
+    return model
