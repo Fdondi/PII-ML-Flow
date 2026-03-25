@@ -18,6 +18,41 @@
   python -m multihead_pii.infer    --input valid.jsonl --checkpoint outputs_multihead/multihead_model.pt --output outputs_multihead/predictions.jsonl
   ```
 
+## MLflow tracking
+
+MLflow experiment tracking is built into the training pipeline.
+When `mlflow` is installed, every `train` run is logged automatically — no extra flags needed.
+
+```bash
+mlflow ui   # visit http://127.0.0.1:5000 to browse runs
+```
+
+See [`multihead_pii/README.md`](multihead_pii/README.md#mlflow-tracking) for the full list of logged parameters, metrics, and artifacts.
+
+### Hyperparameter search with Optuna + MLflow
+
+`hparam_search.py` runs Optuna TPE trials and logs each one as a separate MLflow run.
+With MLflow 3.x the Optuna study is persisted via `MlflowStorage`, so searches can be paused and resumed.
+
+```bash
+python hparam_search.py \
+  --train train.jsonl \
+  --valid valid.jsonl \
+  --n-trials 20 \
+  --experiment pii-hparam-search \
+  --output-root hparam_outputs
+```
+
+Key flags:
+
+```
+--n-trials INT       Number of Optuna trials (default: 10)
+--experiment TEXT    MLflow experiment name shared by all trials (default: pii-hparam-search)
+--base-config PATH   Base config JSON to override with sampled hyperparameters
+--output-root PATH   Root directory; one subdirectory per trial (default: hparam_outputs)
+--seed INT           TPE sampler seed (default: 0)
+```
+
 ## Overlap-aware span scoring
 
 Training and evaluation include partial credit for non-exact overlapping spans.

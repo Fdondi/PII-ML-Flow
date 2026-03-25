@@ -147,6 +147,33 @@ Evaluation includes both discrete and continuous sensitivity metrics:
 
 Overlap-aware span scoring (for non-exact matches): if predicted span length is `N`, gold span length is `M`, and token overlap is `K > 0`, the overlap score is `1 / 2^(M + N - K)`. Exact matches still score `1.0`.
 
+## MLflow tracking
+
+MLflow is an optional dependency. When installed, `train.py` automatically logs to the local MLflow store (`.mlruns/` in the working directory) unless `--no-mlflow` is passed.
+
+**What is logged per run:**
+
+| Category | Items |
+|---|---|
+| Parameters | `model_name`, `learning_rate`, `weight_decay`, `warmup_ratio`, `dropout`, `epochs`, batch sizes, loss weights, thresholds, `seed`, `max_length`, … |
+| Metrics (per epoch) | `train_loss`, `train_proposal_loss`, `train_type_loss`, `train_sensitivity_loss`, `valid_loss` variants |
+| Metrics (final) | `best_valid_loss`, `best_valid_proposal_loss`, `best_valid_type_loss`, `best_valid_sensitivity_loss`, `epochs_trained` |
+| Artifacts | `training/train_history.json`, `model/multihead_model.pt` |
+
+**Relevant flags for `python -m multihead_pii.train`:**
+
+```
+--mlflow-experiment TEXT   MLflow experiment name (default: pii-multihead)
+--mlflow-run-name TEXT     Run name; auto-generated if omitted
+--no-mlflow                Disable tracking even if mlflow is installed
+```
+
+To open the tracking UI:
+
+```bash
+mlflow ui   # then visit http://127.0.0.1:5000
+```
+
 ## Notes
 
 - Checkpoints and reports are isolated under `outputs_multihead/`.
