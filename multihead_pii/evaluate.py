@@ -8,10 +8,10 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from .config import MultiHeadConfig
-from .dataset import JsonlMultiHeadDataset, char_span_to_token_span, collate_fn
+from .dataset import JsonlMultiHeadDataset, _extract_value, char_span_to_token_span, collate_fn
 from .decoder import decode_final_spans, select_non_overlapping_typed_spans
 from .labels import SENSITIVITY_LABEL_TO_ID, TYPE_ID_TO_LABEL
-from .model import MultiHeadPiiModel
+from .model import MultiHeadPiiModel, build_model_from_checkpoint, load_checkpoint
 from .span_credit import soft_match_total_credit
 from .type_comparison import ValueKey, classify_value_relationships, make_value_key
 from .train import resolve_device
@@ -28,12 +28,6 @@ def _prf(tp: float, fp: float, fn: float) -> Dict[str, float]:
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def _extract_value(text: str, start: int, end: int) -> str:
-    safe_start = max(0, min(start, len(text)))
-    safe_end = max(safe_start, min(end, len(text)))
-    return text[safe_start:safe_end]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate multi-head PII model.")
     parser.add_argument("--valid", required=True, help="Validation JSONL path.")
@@ -45,28 +39,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_model(checkpoint_path: str, device: str) -> Tuple[MultiHeadPiiModel, MultiHeadConfig]:
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = MultiHeadConfig(**checkpoint["config"])
-    model = MultiHeadPiiModel(
-        model_name=config.model_name,
-        max_span_len=config.max_span_len,
-        span_width_vocab_size=config.span_width_vocab_size,
-        dropout=config.dropout,
-        proposal_loss_weight=config.proposal_loss_weight,
-        type_loss_weight=config.type_loss_weight,
-        sensitivity_loss_weight=config.sensitivity_loss_weight,
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    model.eval()
-    return model, config
-
-
 @torch.no_grad()
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
-    model, config = _load_model(args.checkpoint, device=device)
+    checkpoint = load_checkpoint(args.checkpoint, device=device)
+    config = MultiHeadConfig(**checkpoint["config"])
+    model = build_model_from_checkpoint(checkpoint, device=device)
 
     encoder_source = str((Path(args.checkpoint).parent / "encoder").resolve())
     if not Path(encoder_source).exists():

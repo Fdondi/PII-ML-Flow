@@ -2,14 +2,60 @@
 
 * (Suggested): create virtual python environment.
 * `pip install -r requirements.txt`
-* add an .env file with OPENAI_API_KEY for generation (or otherwise set the environment variable)
-* generate data with ` python generate_challenging_span_data.py --train-size 1500 --valid-size 300 --model gpt-5-nano --max_dollars 3` (adjust the parameters)
-* (suggested) inspect data quality with `python export_declared_spans.py`, which puts it in human/LLM readable format (.review.md). 
-* run the `modernbert_span_classifier_notebook.ipynb` to train and evaluate the model. It should take ~minutes per epoch on any GPU with 8+GB. Cpu fallback available.
+* add an `.env` file with `OPENAI_API_KEY` for generation (or otherwise set the environment variable)
+* generate data:
+  ```bash
+  python generate_challenging_span_data.py --train-size 1500 --valid-size 300 --model gpt-5-nano --max_dollars 3
+  ```
+* (suggested) inspect data quality:
+  ```bash
+  python export_declared_spans.py   # writes human/LLM-readable .review.md files
+  ```
+* train, evaluate, and infer using the `multihead_pii` package (see [`multihead_pii/README.md`](multihead_pii/README.md)):
+  ```bash
+  python -m multihead_pii.train    --train train.jsonl --valid valid.jsonl --config configs/multihead_v1.json --output outputs_multihead
+  python -m multihead_pii.evaluate --valid valid.jsonl --checkpoint outputs_multihead/multihead_model.pt
+  python -m multihead_pii.infer    --input valid.jsonl --checkpoint outputs_multihead/multihead_model.pt --output outputs_multihead/predictions.jsonl
+  ```
+
+## MLflow tracking
+
+MLflow experiment tracking is built into the training pipeline.
+When `mlflow` is installed, every `train` run is logged automatically — no extra flags needed.
+
+```bash
+mlflow ui   # visit http://127.0.0.1:5000 to browse runs
+```
+
+See [`multihead_pii/README.md`](multihead_pii/README.md#mlflow-tracking) for the full list of logged parameters, metrics, and artifacts.
+
+### Hyperparameter search with Optuna + MLflow
+
+`hparam_search.py` runs Optuna TPE trials and logs each one as a separate MLflow run.
+With MLflow 3.x the Optuna study is persisted via `MlflowStorage`, so searches can be paused and resumed.
+
+```bash
+python hparam_search.py \
+  --train train.jsonl \
+  --valid valid.jsonl \
+  --n-trials 20 \
+  --experiment pii-hparam-search \
+  --output-root hparam_outputs
+```
+
+Key flags:
+
+```
+--n-trials INT       Number of Optuna trials (default: 10)
+--experiment TEXT    MLflow experiment name shared by all trials (default: pii-hparam-search)
+--base-config PATH   Base config JSON to override with sampled hyperparameters
+--output-root PATH   Root directory; one subdirectory per trial (default: hparam_outputs)
+--seed INT           TPE sampler seed (default: 0)
+```
 
 ## Overlap-aware span scoring
 
-Training and evaluation now include partial credit for non-exact overlapping spans.
+Training and evaluation include partial credit for non-exact overlapping spans.
 If predicted span length is `N`, gold span length is `M`, and token overlap is `K > 0`, the overlap score is:
 
 `1 / 2^(M + N - K)`
@@ -55,4 +101,3 @@ Notes:
 - `--local-api-key` is optional; default is `lm-studio`.
 - If `--local` is set and `--local-base-url` is omitted, the script tries `http://127.0.0.1:1234/v1` automatically and uses it when `--model` is found in `/v1/models`.
 - If direct in-process GGUF loading fails on your machine (for example with a native `llama-cpp` crash), use LM Studio API mode as above.
->>>>>>> 729b852 (support local generation)

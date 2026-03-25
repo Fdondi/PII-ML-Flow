@@ -11,16 +11,29 @@
 
 ## Files
 
-- `multihead_pii/config.py` - config dataclass + JSON load/save
-- `multihead_pii/labels.py` - label vocabularies and mappings
-- `multihead_pii/dataset.py` - JSONL dataset adapters + candidate generation
-- `multihead_pii/model.py` - shared encoder + multi-head architecture
-- `multihead_pii/losses.py` - multitask losses
-- `multihead_pii/decoder.py` - postprocessing and conflict handling
-- `multihead_pii/train.py` - training CLI
-- `multihead_pii/infer.py` - inference CLI
-- `multihead_pii/evaluate.py` - evaluation CLI
-- `configs/multihead_v1.json` - default config
+| File | Responsibility |
+|---|---|
+| `config.py` | Config dataclass + JSON load/save |
+| `labels.py` | Label vocabularies and mappings |
+| `dataset.py` | JSONL dataset adapters; canonical home for `_extract_value`, `LABEL_ALIASES`, and `REGEX_TYPE_MAP` |
+| `model.py` | Shared encoder + multi-head architecture; `load_checkpoint` and `build_model_from_checkpoint` helpers |
+| `losses.py` | Multitask losses |
+| `decoder.py` | Postprocessing and conflict handling; canonical home for regex patterns (`EMAIL_PATTERN`, `PHONE_PATTERN`, `IPV4_PATTERN`, `IBAN_PATTERN`, `CREDIT_CARD_PATTERN`) |
+| `train.py` | Training CLI |
+| `infer.py` | Inference CLI |
+| `evaluate.py` | Evaluation CLI |
+| `span_credit.py` | Overlap credit scoring |
+| `type_comparison.py` | Value-key comparison for TP/FP/FN accounting |
+| `ui.py` | Streamlit PDF redaction UI |
+
+### Shared utilities — single source of truth
+
+| Symbol | Defined in | Used by |
+|---|---|---|
+| `EMAIL_PATTERN`, `PHONE_PATTERN`, `IPV4_PATTERN`, `IBAN_PATTERN`, `CREDIT_CARD_PATTERN` | `decoder.py` | `decoder.py`, `dataset.py` |
+| `_extract_value` | `dataset.py` | `infer.py`, `evaluate.py` |
+| `LABEL_ALIASES` | `dataset.py` | `dataset.py`, `train_modernbert_span_classifier.py` |
+| `load_checkpoint`, `build_model_from_checkpoint` | `model.py` | `infer.py`, `evaluate.py` |
 
 ## Data formats
 
@@ -75,7 +88,7 @@ How this is used in the pipeline:
 
 1. The proposal head predicts BIO tags for each token.
 2. BIO spans are decoded into candidate spans (high recall).
-3. Candidate spans are merged with regex candidates.
+3. Candidate spans are merged with regex candidates (patterns from `decoder.py`).
 4. Type and sensitivity heads score each candidate.
 5. Decoder outputs final redaction decisions and confidence values.
 
@@ -99,8 +112,12 @@ python -m multihead_pii.train  --train train.gpt-5-nano.jsonl  --valid valid.gpt
 python -m multihead_pii.infer --input valid.gpt-5-nano.jsonl --checkpoint outputs_multihead/multihead_model.pt --output outputs_multihead/predictions.jsonl
 ```
 
-`typed_predictions` contains per-candidate `redact_probability` (0-1).
-`redactions` contains spans chosen by decoder thresholding.
+`redactions` contains spans chosen by decoder thresholding, each with:
+- `start`, `end`, `value` — character-level span
+- `label` — PII type
+- `decision` — `REDACT`
+- `redact_score` — `type_confidence × redact_probability`
+- `redact_probability`, `type_confidence` — raw head scores
 
 ## PDF redaction UI
 
@@ -128,7 +145,36 @@ Evaluation includes both discrete and continuous sensitivity metrics:
 - `sensitivity_redact_probability_mae`
 - `sensitivity_redact_probability_brier`
 
+Overlap-aware span scoring (for non-exact matches): if predicted span length is `N`, gold span length is `M`, and token overlap is `K > 0`, the overlap score is `1 / 2^(M + N - K)`. Exact matches still score `1.0`.
+
+## MLflow tracking
+
+MLflow is an optional dependency. When installed, `train.py` automatically logs to the local MLflow store (`.mlruns/` in the working directory) unless `--no-mlflow` is passed.
+
+**What is logged per run:**
+
+| Category | Items |
+|---|---|
+| Parameters | `model_name`, `learning_rate`, `weight_decay`, `warmup_ratio`, `dropout`, `epochs`, batch sizes, loss weights, thresholds, `seed`, `max_length`, … |
+| Metrics (per epoch) | `train_loss`, `train_proposal_loss`, `train_type_loss`, `train_sensitivity_loss`, `valid_loss` variants |
+| Metrics (final) | `best_valid_loss`, `best_valid_proposal_loss`, `best_valid_type_loss`, `best_valid_sensitivity_loss`, `epochs_trained` |
+| Artifacts | `training/train_history.json`, `model/multihead_model.pt` |
+
+**Relevant flags for `python -m multihead_pii.train`:**
+
+```
+--mlflow-experiment TEXT   MLflow experiment name (default: pii-multihead)
+--mlflow-run-name TEXT     Run name; auto-generated if omitted
+--no-mlflow                Disable tracking even if mlflow is installed
+```
+
+To open the tracking UI:
+
+```bash
+mlflow ui   # then visit http://127.0.0.1:5000
+```
+
 ## Notes
 
-- Existing project files are untouched by this rollout.
 - Checkpoints and reports are isolated under `outputs_multihead/`.
+- `train_modernbert_span_classifier.py` is a legacy standalone script; it imports `LABEL_ALIASES` from this package rather than defining its own copy.

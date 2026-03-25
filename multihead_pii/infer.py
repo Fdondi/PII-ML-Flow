@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from .config import MultiHeadConfig
-from .dataset import JsonlMultiHeadDataset, collate_fn
+from .dataset import JsonlMultiHeadDataset, _extract_value, collate_fn
 from .decoder import (
     DecodedSpan,
     attach_regex_candidates,
@@ -17,15 +17,9 @@ from .decoder import (
     select_non_overlapping_typed_spans,
 )
 from .labels import TYPE_ID_TO_LABEL
-from .model import MultiHeadPiiModel
+from .model import MultiHeadPiiModel, build_model_from_checkpoint, load_checkpoint
 from .type_comparison import ValueKey, classify_value_relationships, make_value_key
 from .train import resolve_device
-
-
-def _extract_value(text: str, start: int, end: int) -> str:
-    safe_start = max(0, min(start, len(text)))
-    safe_end = max(safe_start, min(end, len(text)))
-    return text[safe_start:safe_end]
 
 
 def _value_dict(label: str, value: str) -> Dict:
@@ -33,29 +27,6 @@ def _value_dict(label: str, value: str) -> Dict:
         "value": value,
         "label": label,
     }
-
-
-def _load_checkpoint(checkpoint_path: str, device: str) -> Dict:
-    return torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-
-def _build_model_from_checkpoint(
-    checkpoint: Dict,
-    device: str,
-) -> MultiHeadPiiModel:
-    cfg = MultiHeadConfig(**checkpoint["config"])
-    model = MultiHeadPiiModel(
-        model_name=cfg.model_name,
-        max_span_len=cfg.max_span_len,
-        span_width_vocab_size=cfg.span_width_vocab_size,
-        dropout=cfg.dropout,
-        proposal_loss_weight=cfg.proposal_loss_weight,
-        type_loss_weight=cfg.type_loss_weight,
-        sensitivity_loss_weight=cfg.sensitivity_loss_weight,
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    model.eval()
-    return model
 
 
 def _enumerate_candidates_from_offsets(
@@ -133,14 +104,14 @@ def _merge_window_redactions(spans: List[DecodedSpan], iou_threshold: float) -> 
 
 def load_inference_bundle(checkpoint_path: str, device: str = "auto") -> Dict[str, Any]:
     resolved_device = resolve_device(device)
-    checkpoint = _load_checkpoint(checkpoint_path, device=resolved_device)
+    checkpoint = load_checkpoint(checkpoint_path, device=resolved_device)
     config = MultiHeadConfig(**checkpoint["config"])
 
     encoder_source = str((Path(checkpoint_path).parent / "encoder").resolve())
     if not Path(encoder_source).exists():
         encoder_source = config.model_name
     tokenizer = AutoTokenizer.from_pretrained(encoder_source, use_fast=True)
-    model = _build_model_from_checkpoint(checkpoint, device=resolved_device)
+    model = build_model_from_checkpoint(checkpoint, device=resolved_device)
     return {
         "device": resolved_device,
         "config": config,
@@ -229,7 +200,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
-    checkpoint = _load_checkpoint(args.checkpoint, device=device)
+    checkpoint = load_checkpoint(args.checkpoint, device=device)
     config = MultiHeadConfig(**checkpoint["config"])
 
     encoder_source = str((Path(args.checkpoint).parent / "encoder").resolve())
@@ -256,7 +227,7 @@ def main() -> None:
         collate_fn=collate_fn,
     )
 
-    model = _build_model_from_checkpoint(checkpoint, device=device)
+    model = build_model_from_checkpoint(checkpoint, device=device)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

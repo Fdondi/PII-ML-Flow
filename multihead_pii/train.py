@@ -18,6 +18,8 @@ from .labels import (
 )
 from .model import MultiHeadPiiModel
 
+import mlflow
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -112,6 +114,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSONL sensitivity companion for validation rows.",
     )
+    parser.add_argument(
+        "--mlflow-experiment",
+        default="pii-multihead",
+        help="MLflow experiment name (default: pii-multihead).",
+    )
+    parser.add_argument(
+        "--mlflow-run-name",
+        default=None,
+        help="MLflow run name. Auto-generated if not provided.",
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="Disable MLflow tracking even if mlflow is installed.",
+    )
     return parser.parse_args()
 
 
@@ -123,6 +140,53 @@ def main() -> None:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    use_mlflow = not args.no_mlflow
+    if use_mlflow:
+        tracking_uri = mlflow.get_tracking_uri()
+        print(f"[mlflow] tracking URI: {tracking_uri}")
+
+        stale = mlflow.active_run()
+        if stale is not None:
+            print(
+                f"[mlflow] WARNING: a run is already active before start_run "
+                f"(run_id={stale.info.run_id}, status={stale.info.status}); "
+                f"this may cause metrics to be logged to the wrong run"
+            )
+
+        print(f"[mlflow] setting experiment: {args.mlflow_experiment!r}")
+        experiment = mlflow.set_experiment(args.mlflow_experiment)
+        print(f"[mlflow] experiment id: {experiment.experiment_id}")
+
+        print(f"[mlflow] starting run (name={args.mlflow_run_name!r})")
+        active_run = mlflow.start_run(run_name=args.mlflow_run_name)
+        print(f"[mlflow] run started: run_id={active_run.info.run_id}")
+
+        params = {
+            "model_name": config.model_name,
+            "learning_rate": config.learning_rate,
+            "weight_decay": config.weight_decay,
+            "warmup_ratio": config.warmup_ratio,
+            "dropout": config.dropout,
+            "epochs": config.epochs,
+            "train_batch_size": config.train_batch_size,
+            "max_span_len": config.max_span_len,
+            "negative_sample_rate": config.negative_sample_rate,
+            "proposal_loss_weight": config.proposal_loss_weight,
+            "type_loss_weight": config.type_loss_weight,
+            "sensitivity_loss_weight": config.sensitivity_loss_weight,
+            "lookalike_redact_target": config.lookalike_redact_target,
+            "no_info_keep_target": config.no_info_keep_target,
+            "early_stopping_patience": config.early_stopping_patience,
+            "early_stopping_min_delta": config.early_stopping_min_delta,
+            "seed": config.seed,
+            "max_length": config.max_length,
+            "nms_iou_threshold": config.nms_iou_threshold,
+            "redact_score_threshold": config.redact_score_threshold,
+        }
+        print(f"[mlflow] logging {len(params)} params")
+        mlflow.log_params(params)
+        print(f"[mlflow] params logged")
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_name, use_fast=True)
     train_ds = JsonlMultiHeadDataset(
@@ -186,72 +250,127 @@ def main() -> None:
     best_monitored = {name: float("inf") for name in monitored_losses}
     epochs_without_progress = 0
     history = []
-    for epoch in range(config.epochs):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, scheduler, device)
-        valid_metrics = evaluate_loss(model, valid_loader, device)
-        row = {
-            "epoch": epoch + 1,
-            "train": train_metrics,
-            "valid": valid_metrics,
-        }
-        history.append(row)
-        print(
-            f"epoch={epoch + 1} train_loss={train_metrics['loss']:.4f} "
-            f"valid_loss={valid_metrics['loss']:.4f}"
-        )
-
-        progressed_losses = []
-        min_delta = max(0.0, float(config.early_stopping_min_delta))
-        for loss_name in monitored_losses:
-            loss_value = valid_metrics[loss_name]
-            if math.isfinite(loss_value) and loss_value < (best_monitored[loss_name] - min_delta):
-                best_monitored[loss_name] = loss_value
-                progressed_losses.append(loss_name)
-
-        if progressed_losses:
-            epochs_without_progress = 0
-        else:
-            epochs_without_progress += 1
-
-        print(
-            "early-stop monitor: "
-            f"no_progress={epochs_without_progress}/{config.early_stopping_patience}, "
-            f"min_delta={min_delta:.6f}, "
-            f"best_proposal={best_monitored['proposal_loss']:.6f}, "
-            f"best_type={best_monitored['type_loss']:.6f}, "
-            f"best_sensitivity={best_monitored['sensitivity_loss']:.6f}"
-        )
-
-        valid_loss_value = valid_metrics["loss"]
-        is_better = (
-            epoch == 0
-            or (math.isfinite(valid_loss_value) and valid_loss_value < best_valid)
-        )
-        if is_better:
-            best_valid = valid_metrics["loss"]
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "config": config.to_dict(),
-                    "type_label_to_id": TYPE_LABEL_TO_ID,
-                    "sensitivity_label_to_id": SENSITIVITY_LABEL_TO_ID,
-                    "bio_label_to_id": BIO_LABEL_TO_ID,
-                },
-                output_dir / "multihead_model.pt",
-            )
-            model.encoder.save_pretrained(output_dir / "encoder")
-            tokenizer.save_pretrained(output_dir / "encoder")
-
-        if config.early_stopping_patience > 0 and epochs_without_progress >= config.early_stopping_patience:
+    try:
+        for epoch in range(config.epochs):
+            train_metrics = train_one_epoch(model, train_loader, optimizer, scheduler, device)
+            valid_metrics = evaluate_loss(model, valid_loader, device)
+            row = {
+                "epoch": epoch + 1,
+                "train": train_metrics,
+                "valid": valid_metrics,
+            }
+            history.append(row)
             print(
-                f"early stopping at epoch {epoch + 1} "
-                f"(no significant progress in {config.early_stopping_patience} epochs "
-                f"across proposal/type/sensitivity validation losses)"
+                f"epoch={epoch + 1} train_loss={train_metrics['loss']:.4f} "
+                f"valid_loss={valid_metrics['loss']:.4f}"
             )
-            break
 
-    history_path = output_dir / "train_history.json"
-    history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+            if use_mlflow:
+                epoch_metrics = {
+                    "train_loss": train_metrics["loss"],
+                    "train_proposal_loss": train_metrics["proposal_loss"],
+                    "train_type_loss": train_metrics["type_loss"],
+                    "train_sensitivity_loss": train_metrics["sensitivity_loss"],
+                    "valid_loss": valid_metrics["loss"],
+                    "valid_proposal_loss": valid_metrics["proposal_loss"],
+                    "valid_type_loss": valid_metrics["type_loss"],
+                    "valid_sensitivity_loss": valid_metrics["sensitivity_loss"],
+                }
+                non_finite = [k for k, v in epoch_metrics.items() if not math.isfinite(v)]
+                if non_finite:
+                    print(f"[mlflow] WARNING: non-finite metric values at epoch {epoch + 1}: {non_finite}")
+                print(f"[mlflow] logging metrics at step {epoch + 1}: " +
+                      ", ".join(f"{k}={v:.4f}" for k, v in epoch_metrics.items()))
+                mlflow.log_metrics(epoch_metrics, step=epoch + 1)
+                print(f"[mlflow] epoch {epoch + 1} metrics logged")
+
+            progressed_losses = []
+            min_delta = max(0.0, float(config.early_stopping_min_delta))
+            for loss_name in monitored_losses:
+                loss_value = valid_metrics[loss_name]
+                if math.isfinite(loss_value) and loss_value < (best_monitored[loss_name] - min_delta):
+                    best_monitored[loss_name] = loss_value
+                    progressed_losses.append(loss_name)
+
+            if progressed_losses:
+                epochs_without_progress = 0
+            else:
+                epochs_without_progress += 1
+
+            print(
+                "early-stop monitor: "
+                f"no_progress={epochs_without_progress}/{config.early_stopping_patience}, "
+                f"min_delta={min_delta:.6f}, "
+                f"best_proposal={best_monitored['proposal_loss']:.6f}, "
+                f"best_type={best_monitored['type_loss']:.6f}, "
+                f"best_sensitivity={best_monitored['sensitivity_loss']:.6f}"
+            )
+
+            valid_loss_value = valid_metrics["loss"]
+            is_better = (
+                epoch == 0
+                or (math.isfinite(valid_loss_value) and valid_loss_value < best_valid)
+            )
+            if is_better:
+                best_valid = valid_metrics["loss"]
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "config": config.to_dict(),
+                        "type_label_to_id": TYPE_LABEL_TO_ID,
+                        "sensitivity_label_to_id": SENSITIVITY_LABEL_TO_ID,
+                        "bio_label_to_id": BIO_LABEL_TO_ID,
+                    },
+                    output_dir / "multihead_model.pt",
+                )
+                model.encoder.save_pretrained(output_dir / "encoder")
+                tokenizer.save_pretrained(output_dir / "encoder")
+
+            if config.early_stopping_patience > 0 and epochs_without_progress >= config.early_stopping_patience:
+                print(
+                    f"early stopping at epoch {epoch + 1} "
+                    f"(no significant progress in {config.early_stopping_patience} epochs "
+                    f"across proposal/type/sensitivity validation losses)"
+                )
+                break
+
+        history_path = output_dir / "train_history.json"
+        history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+        if use_mlflow:
+            if not math.isfinite(best_valid):
+                print(f"[mlflow] WARNING: best_valid_loss is {best_valid} (no epochs completed?); "
+                      f"logging anyway")
+            for key, value in [
+                ("best_valid_loss", best_valid),
+                ("best_valid_proposal_loss", best_monitored["proposal_loss"]),
+                ("best_valid_type_loss", best_monitored["type_loss"]),
+                ("best_valid_sensitivity_loss", best_monitored["sensitivity_loss"]),
+                ("epochs_trained", len(history)),
+            ]:
+                print(f"[mlflow] logging final metric {key}={value}")
+                mlflow.log_metric(key, value)
+            print(f"[mlflow] logging artifact: {history_path}")
+            mlflow.log_artifact(str(history_path), artifact_path="training")
+            checkpoint_path = output_dir / "multihead_model.pt"
+            if not checkpoint_path.exists():
+                print(f"[mlflow] WARNING: checkpoint {checkpoint_path} does not exist; "
+                      f"artifact will not be logged")
+            else:
+                print(f"[mlflow] logging artifact: {checkpoint_path}")
+                mlflow.log_artifact(str(checkpoint_path), artifact_path="model")
+
+    finally:
+        if use_mlflow:
+            run = mlflow.active_run()
+            if run is None:
+                print("[mlflow] WARNING: no active run found in finally block; "
+                      "end_run() skipped (run may have been ended or never started)")
+            else:
+                print(f"[mlflow] ending run {run.info.run_id} (status={run.info.status})")
+                mlflow.end_run()
+                print("[mlflow] run ended")
+
     print(f"saved best checkpoint to {(output_dir / 'multihead_model.pt').resolve()}")
     print(f"saved train history to {history_path.resolve()}")
 

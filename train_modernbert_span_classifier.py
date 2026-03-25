@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 from pii_labels import TRAINING_LABELS
+from multihead_pii.dataset import LABEL_ALIASES
 
 MODEL_NAME = "answerdotai/ModernBERT-base"
 MAX_LENGTH = 512
@@ -21,25 +22,6 @@ LR = 2e-5
 WEIGHT_DECAY = 0.01
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-LABEL_ALIASES = {
-    "PHONE_NUMBER": "PHONE",
-    "TELEPHONE": "PHONE",
-    "ORGANIZATION": "ORG",
-    "IP": "IP_ADDRESS",
-    "IPADDRESS": "IP_ADDRESS",
-    "DATE_TIME": "OTHER",
-    "LOCATION": "OTHER",
-    "CITY": "OTHER",
-    "COUNTRY": "OTHER",
-    "STATE": "OTHER",
-    "ZIPCODE": "ADDRESS",
-    "ZIP_CODE": "ADDRESS",
-    "POSTAL_CODE": "ADDRESS",
-    "FIRST_NAME": "PERSON",
-    "LAST_NAME": "PERSON",
-    "NAME": "PERSON",
-}
 
 
 def set_seed(seed: int = SEED):
