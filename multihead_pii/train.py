@@ -143,9 +143,26 @@ def main() -> None:
 
     use_mlflow = not args.no_mlflow
     if use_mlflow:
-        mlflow.set_experiment(args.mlflow_experiment)
+        tracking_uri = mlflow.get_tracking_uri()
+        print(f"[mlflow] tracking URI: {tracking_uri}")
+
+        stale = mlflow.active_run()
+        if stale is not None:
+            print(
+                f"[mlflow] WARNING: a run is already active before start_run "
+                f"(run_id={stale.info.run_id}, status={stale.info.status}); "
+                f"this may cause metrics to be logged to the wrong run"
+            )
+
+        print(f"[mlflow] setting experiment: {args.mlflow_experiment!r}")
+        experiment = mlflow.set_experiment(args.mlflow_experiment)
+        print(f"[mlflow] experiment id: {experiment.experiment_id}")
+
+        print(f"[mlflow] starting run (name={args.mlflow_run_name!r})")
         active_run = mlflow.start_run(run_name=args.mlflow_run_name)
-        mlflow.log_params({
+        print(f"[mlflow] run started: run_id={active_run.info.run_id}")
+
+        params = {
             "model_name": config.model_name,
             "learning_rate": config.learning_rate,
             "weight_decay": config.weight_decay,
@@ -166,7 +183,10 @@ def main() -> None:
             "max_length": config.max_length,
             "nms_iou_threshold": config.nms_iou_threshold,
             "redact_score_threshold": config.redact_score_threshold,
-        })
+        }
+        print(f"[mlflow] logging {len(params)} params")
+        mlflow.log_params(params)
+        print(f"[mlflow] params logged")
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_name, use_fast=True)
     train_ds = JsonlMultiHeadDataset(
@@ -246,19 +266,23 @@ def main() -> None:
             )
 
             if use_mlflow:
-                mlflow.log_metrics(
-                    {
-                        "train_loss": train_metrics["loss"],
-                        "train_proposal_loss": train_metrics["proposal_loss"],
-                        "train_type_loss": train_metrics["type_loss"],
-                        "train_sensitivity_loss": train_metrics["sensitivity_loss"],
-                        "valid_loss": valid_metrics["loss"],
-                        "valid_proposal_loss": valid_metrics["proposal_loss"],
-                        "valid_type_loss": valid_metrics["type_loss"],
-                        "valid_sensitivity_loss": valid_metrics["sensitivity_loss"],
-                    },
-                    step=epoch + 1,
-                )
+                epoch_metrics = {
+                    "train_loss": train_metrics["loss"],
+                    "train_proposal_loss": train_metrics["proposal_loss"],
+                    "train_type_loss": train_metrics["type_loss"],
+                    "train_sensitivity_loss": train_metrics["sensitivity_loss"],
+                    "valid_loss": valid_metrics["loss"],
+                    "valid_proposal_loss": valid_metrics["proposal_loss"],
+                    "valid_type_loss": valid_metrics["type_loss"],
+                    "valid_sensitivity_loss": valid_metrics["sensitivity_loss"],
+                }
+                non_finite = [k for k, v in epoch_metrics.items() if not math.isfinite(v)]
+                if non_finite:
+                    print(f"[mlflow] WARNING: non-finite metric values at epoch {epoch + 1}: {non_finite}")
+                print(f"[mlflow] logging metrics at step {epoch + 1}: " +
+                      ", ".join(f"{k}={v:.4f}" for k, v in epoch_metrics.items()))
+                mlflow.log_metrics(epoch_metrics, step=epoch + 1)
+                print(f"[mlflow] epoch {epoch + 1} metrics logged")
 
             progressed_losses = []
             min_delta = max(0.0, float(config.early_stopping_min_delta))
@@ -314,17 +338,38 @@ def main() -> None:
         history_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
 
         if use_mlflow:
-            mlflow.log_metric("best_valid_loss", best_valid)
-            mlflow.log_metric("best_valid_proposal_loss", best_monitored["proposal_loss"])
-            mlflow.log_metric("best_valid_type_loss", best_monitored["type_loss"])
-            mlflow.log_metric("best_valid_sensitivity_loss", best_monitored["sensitivity_loss"])
-            mlflow.log_metric("epochs_trained", len(history))
+            if not math.isfinite(best_valid):
+                print(f"[mlflow] WARNING: best_valid_loss is {best_valid} (no epochs completed?); "
+                      f"logging anyway")
+            for key, value in [
+                ("best_valid_loss", best_valid),
+                ("best_valid_proposal_loss", best_monitored["proposal_loss"]),
+                ("best_valid_type_loss", best_monitored["type_loss"]),
+                ("best_valid_sensitivity_loss", best_monitored["sensitivity_loss"]),
+                ("epochs_trained", len(history)),
+            ]:
+                print(f"[mlflow] logging final metric {key}={value}")
+                mlflow.log_metric(key, value)
+            print(f"[mlflow] logging artifact: {history_path}")
             mlflow.log_artifact(str(history_path), artifact_path="training")
-            mlflow.log_artifact(str(output_dir / "multihead_model.pt"), artifact_path="model")
+            checkpoint_path = output_dir / "multihead_model.pt"
+            if not checkpoint_path.exists():
+                print(f"[mlflow] WARNING: checkpoint {checkpoint_path} does not exist; "
+                      f"artifact will not be logged")
+            else:
+                print(f"[mlflow] logging artifact: {checkpoint_path}")
+                mlflow.log_artifact(str(checkpoint_path), artifact_path="model")
 
     finally:
         if use_mlflow:
-            mlflow.end_run()
+            run = mlflow.active_run()
+            if run is None:
+                print("[mlflow] WARNING: no active run found in finally block; "
+                      "end_run() skipped (run may have been ended or never started)")
+            else:
+                print(f"[mlflow] ending run {run.info.run_id} (status={run.info.status})")
+                mlflow.end_run()
+                print("[mlflow] run ended")
 
     print(f"saved best checkpoint to {(output_dir / 'multihead_model.pt').resolve()}")
     print(f"saved train history to {history_path.resolve()}")
