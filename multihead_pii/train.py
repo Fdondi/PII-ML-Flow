@@ -146,6 +146,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     use_mlflow = _MLFLOW_AVAILABLE and not args.no_mlflow
+    if not args.no_mlflow and not _MLFLOW_AVAILABLE:
+        print("WARNING: mlflow is not installed — tracking disabled. "
+              "Run `pip install mlflow>=3.0.0` or pass --no-mlflow to silence this.")
     if use_mlflow:
         mlflow.set_experiment(args.mlflow_experiment)
         active_run = mlflow.start_run(run_name=args.mlflow_run_name)
